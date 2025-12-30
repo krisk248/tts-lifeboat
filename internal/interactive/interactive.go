@@ -80,11 +80,11 @@ func printBanner(cfg *config.Config, b *backup.Backup) {
 	fmt.Printf("  Environment: %s\n", cfg.Environment)
 	fmt.Println()
 
-	// 7-Zip status
-	if b.IsSevenZipAvailable() {
-		fmt.Printf("  7-Zip:       Found (%s)\n", b.GetSevenZipPath())
+	// Compression status
+	if b.IsCompressorAvailable() {
+		fmt.Printf("  Compressor:  Ready (%s format)\n", b.GetCompressionFormat())
 	} else {
-		fmt.Println("  7-Zip:       NOT FOUND - Please install 7-Zip!")
+		fmt.Println("  Compressor:  NOT READY - Please install 7-Zip!")
 	}
 	fmt.Println()
 
@@ -150,12 +150,11 @@ func runBackup(b *backup.Backup, reader *bufio.Reader, checkpoint bool) {
 	fmt.Printf("  === %s Backup ===\n", backupType)
 	fmt.Println()
 
-	// Check 7-Zip availability
-	if !b.IsSevenZipAvailable() {
-		fmt.Println("  ERROR: 7-Zip not found!")
+	// Check compressor availability
+	if !b.IsCompressorAvailable() {
+		fmt.Println("  ERROR: Compressor not available!")
 		fmt.Println()
-		fmt.Println("  Please install 7-Zip from https://www.7-zip.org/")
-		fmt.Println("  Or configure the path in lifeboat.yaml under seven_zip.path")
+		fmt.Println("  For legacy systems, install 7-Zip from https://www.7-zip.org/")
 		fmt.Print("\n  Press Enter to continue...")
 		reader.ReadString('\n')
 		return
@@ -349,11 +348,11 @@ func runRestore(b *backup.Backup, reader *bufio.Reader) {
 	fmt.Println("  === Restore Backup ===")
 	fmt.Println()
 
-	// Check 7-Zip availability
-	if !b.IsSevenZipAvailable() {
-		fmt.Println("  ERROR: 7-Zip not found!")
+	// Check compressor availability
+	if !b.IsCompressorAvailable() {
+		fmt.Println("  ERROR: Compressor not available!")
 		fmt.Println()
-		fmt.Println("  Please install 7-Zip from https://www.7-zip.org/")
+		fmt.Println("  For legacy systems, install 7-Zip from https://www.7-zip.org/")
 		fmt.Print("\n  Press Enter to continue...")
 		reader.ReadString('\n')
 		return

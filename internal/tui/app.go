@@ -305,11 +305,11 @@ func (m Model) viewWelcome() string {
 	sb.WriteString(info)
 	sb.WriteString("\n")
 
-	// 7-Zip status
-	if m.backup.IsSevenZipAvailable() {
-		sb.WriteString(fmt.Sprintf("|   7-Zip: Found %-43s|\n", truncate(m.backup.GetSevenZipPath(), 43)))
+	// Compression status
+	if m.backup.IsCompressorAvailable() {
+		sb.WriteString(fmt.Sprintf("|   Format: %-48s|\n", m.backup.GetCompressionFormat()))
 	} else {
-		sb.WriteString("|   7-Zip: NOT FOUND - Please install 7-Zip!                    |\n")
+		sb.WriteString("|   Compressor: NOT READY - Check installation!                 |\n")
 	}
 
 	// Get backup stats
@@ -337,15 +337,15 @@ func (m Model) viewWelcome() string {
 			style = styles.MenuItemSelectedStyle
 		}
 
-		// Disable backup options if 7-Zip not found
+		// Disable backup options if compressor not ready
 		disabled := false
-		if (item.Key == "b" || item.Key == "p" || item.Key == "r") && !m.backup.IsSevenZipAvailable() {
+		if (item.Key == "b" || item.Key == "p" || item.Key == "r") && !m.backup.IsCompressorAvailable() {
 			disabled = true
 		}
 
 		label := fmt.Sprintf("%s[%s] %s", cursor, item.Key, item.Label)
 		if disabled {
-			label += " (7-Zip required)"
+			label += " (compressor required)"
 			style = styles.MutedStyle()
 		}
 		sb.WriteString(style.Render(label))
@@ -546,9 +546,9 @@ func (m Model) selectMenuItem() (tea.Model, tea.Cmd) {
 
 	item := m.menuItems[m.menuIndex]
 
-	// Check 7-Zip availability for backup/restore
-	if (item.Key == "b" || item.Key == "p" || item.Key == "r") && !m.backup.IsSevenZipAvailable() {
-		m.error = fmt.Errorf("7-Zip not found. Please install 7-Zip from https://www.7-zip.org/")
+	// Check compressor availability for backup/restore
+	if (item.Key == "b" || item.Key == "p" || item.Key == "r") && !m.backup.IsCompressorAvailable() {
+		m.error = fmt.Errorf("compressor not available. For legacy systems, install 7-Zip")
 		m.screen = ScreenError
 		return m, nil
 	}
@@ -656,8 +656,8 @@ func (m Model) showList() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) showRestore() (tea.Model, tea.Cmd) {
-	if !m.backup.IsSevenZipAvailable() {
-		m.error = fmt.Errorf("7-Zip not found. Please install 7-Zip")
+	if !m.backup.IsCompressorAvailable() {
+		m.error = fmt.Errorf("compressor not available")
 		m.screen = ScreenError
 		return m, nil
 	}

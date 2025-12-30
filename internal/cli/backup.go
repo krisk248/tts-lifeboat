@@ -56,9 +56,9 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
-	// Check 7-Zip availability
-	if !b.IsSevenZipAvailable() {
-		return fmt.Errorf("7-Zip not found. Please install 7-Zip from https://www.7-zip.org/ or configure seven_zip.path in lifeboat.yaml")
+	// Check compressor availability
+	if !b.IsCompressorAvailable() {
+		return fmt.Errorf("compressor not available. For legacy systems, install 7-Zip from https://www.7-zip.org/")
 	}
 
 	// Progress callback for CLI

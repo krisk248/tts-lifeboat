@@ -115,13 +115,20 @@ seven_zip:
   threads: 1
 
 # ===================
-# COMPRESSION (LEGACY)
+# COMPRESSION
 # ===================
-# NOTE: These settings are for reference only.
-# v0.1.5+ uses external 7-Zip instead of internal compression.
+# v0.1.6+: Pure Go streaming compression (no external dependencies on modern builds)
+# Modern builds (.tar.zst): Fast, best compression, low memory (~2-5MB RAM)
+# Legacy builds (.7z): Uses external 7-Zip (install from 7-zip.org)
+#
+# Output formats by build:
+#   Modern (Go 1.23+):  .tar.zst (extractable with 7-Zip v21.01+, WinRAR v6.10+)
+#   Legacy (Go 1.20):   .7z (requires 7-Zip installed)
+#   Fallback:           .zip (universal compatibility)
 
 compression:
   enabled: true
+  # Compression level (1-9): 1=fastest, 5=balanced, 9=best compression
   level: 5
 
   # Files with these extensions are already compressed
@@ -135,6 +142,8 @@ compression:
     - ".tgz"
     - ".7z"
     - ".rar"
+    - ".zst"
+    - ".tar.zst"
 
 # ===================
 # LOGGING
@@ -158,10 +167,16 @@ logging:
 # ===================
 #
 # 1. PREREQUISITES:
-#    - Install 7-Zip from https://www.7-zip.org/
-#    - Verify: 7z --help
+#    Modern build (v0.1.6+): No external dependencies!
+#    Legacy build: Install 7-Zip from https://www.7-zip.org/
 #
-# 2. QUICK START:
+# 2. EXTRACTING BACKUPS:
+#    .tar.zst files can be extracted with:
+#    - 7-Zip (v21.01+): Right-click > 7-Zip > Extract
+#    - WinRAR (v6.10+): Right-click > Extract
+#    - Linux: tar -xf backup.tar.zst
+#
+# 3. QUICK START:
 #    - Set 'name' to identify this instance
 #    - Set 'webapps_path' to your Tomcat webapps folder
 #    - Run: lifeboat config validate

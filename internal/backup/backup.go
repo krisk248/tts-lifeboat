@@ -36,17 +36,17 @@ type BackupResult struct {
 
 // Backup orchestrates the backup process.
 type Backup struct {
-	config    *config.Config
-	collector *Collector
-	sevenZip  *SevenZip
+	config     *config.Config
+	collector  *Collector
+	compressor *StreamingCompressor
 }
 
 // New creates a new backup instance.
 func New(cfg *config.Config) *Backup {
 	return &Backup{
-		config:    cfg,
-		collector: NewCollector(cfg),
-		sevenZip:  NewSevenZip(cfg),
+		config:     cfg,
+		collector:  NewCollector(cfg),
+		compressor: NewStreamingCompressor(cfg),
 	}
 }
 
@@ -153,14 +153,21 @@ type CustomFolderInfo struct {
 	Exists   bool
 }
 
-// IsSevenZipAvailable checks if 7-Zip is available.
-func (b *Backup) IsSevenZipAvailable() bool {
-	return b.sevenZip.IsAvailable()
+// IsCompressorAvailable checks if the compressor is ready.
+// For modern builds, this always returns true (pure Go).
+// For legacy builds, this checks if 7-Zip is available.
+func (b *Backup) IsCompressorAvailable() bool {
+	return b.compressor.IsAvailable()
 }
 
-// GetSevenZipPath returns the 7-Zip path.
-func (b *Backup) GetSevenZipPath() string {
-	return b.sevenZip.GetPath()
+// GetCompressionFormat returns the format used by the compressor.
+func (b *Backup) GetCompressionFormat() string {
+	return b.compressor.GetFormat()
+}
+
+// IsSevenZipAvailable checks if 7-Zip is available (backward compat).
+func (b *Backup) IsSevenZipAvailable() bool {
+	return b.compressor.IsAvailable()
 }
 
 // Run executes a backup with the given options.
@@ -173,10 +180,13 @@ func (b *Backup) Run(opts BackupOptions, progress ProgressCallback) (*BackupResu
 
 	logger.Info("starting backup", "id", result.ID)
 
-	// Validate 7-Zip availability
-	if !b.sevenZip.IsAvailable() {
-		return nil, fmt.Errorf("7-Zip not found. Please install 7-Zip or configure seven_zip.path in lifeboat.yaml")
+	// Validate compressor availability
+	if !b.compressor.IsAvailable() {
+		return nil, fmt.Errorf("compressor not available. For legacy builds, install 7-Zip")
 	}
+
+	// Get archive extension from compressor
+	archiveExt := "." + b.compressor.GetFormat()
 
 	// Phase 1: Create backup directory structure
 	if progress != nil {
@@ -202,9 +212,6 @@ func (b *Backup) Run(opts BackupOptions, progress ProgressCallback) (*BackupResu
 	if err := os.MkdirAll(backupPath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create backup directory: %w", err)
 	}
-
-	// Temp directory for copy-then-compress
-	tempPath := filepath.Join(backupPath, "temp")
 
 	// Determine which webapps to backup
 	webappsToBackup := opts.SelectedWebapps
@@ -249,23 +256,16 @@ func (b *Backup) Run(opts BackupOptions, progress ProgressCallback) (*BackupResu
 
 		logger.Info("processing webapp", "name", webappName, "source", webappSrc)
 
-		// Archive path
-		archivePath := filepath.Join(backupPath, fmt.Sprintf("%s.7z", sanitizeFolderName(webappName)))
-		webappTemp := filepath.Join(tempPath, webappName)
+		// Archive path (extension based on compressor format)
+		archivePath := filepath.Join(backupPath, sanitizeFolderName(webappName)+archiveExt)
 
-		// Copy-then-compress
-		szResult, err := b.sevenZip.CopyThenCompress(
+		// Streaming compression (pure Go for modern, 7-Zip for legacy)
+		compResult, err := b.compressor.CompressFolder(
 			webappSrc,
 			archivePath,
-			webappTemp,
 			func(current int, filename string) {
 				if progress != nil {
-					progress("copy", current, 0, filename)
-				}
-			},
-			func(message string) {
-				if progress != nil {
-					progress("compress", i+1, len(webappsToBackup), message)
+					progress("compress", current, 0, filename)
 				}
 			},
 		)
@@ -276,10 +276,10 @@ func (b *Backup) Run(opts BackupOptions, progress ProgressCallback) (*BackupResu
 			continue
 		}
 
-		result.FilesProcessed += szResult.FilesProcessed
-		result.OriginalSize += szResult.OriginalSize
-		result.CompressedSize += szResult.CompressedSize
-		result.Errors = append(result.Errors, szResult.Errors...)
+		result.FilesProcessed += compResult.FilesProcessed
+		result.OriginalSize += compResult.OriginalSize
+		result.CompressedSize += compResult.CompressedSize
+		result.Errors = append(result.Errors, compResult.Errors...)
 	}
 
 	// Phase 3: Backup custom folders
@@ -314,21 +314,14 @@ func (b *Backup) Run(opts BackupOptions, progress ProgressCallback) (*BackupResu
 
 		logger.Info("processing custom folder", "title", folder.Title, "path", folder.Path)
 
-		archivePath := filepath.Join(backupPath, fmt.Sprintf("%s.7z", sanitizeFolderName(folder.Title)))
-		folderTemp := filepath.Join(tempPath, sanitizeFolderName(folder.Title))
+		archivePath := filepath.Join(backupPath, sanitizeFolderName(folder.Title)+archiveExt)
 
-		szResult, err := b.sevenZip.CopyThenCompress(
+		compResult, err := b.compressor.CompressFolder(
 			folder.Path,
 			archivePath,
-			folderTemp,
 			func(current int, filename string) {
 				if progress != nil {
-					progress("copy", current, 0, filename)
-				}
-			},
-			func(message string) {
-				if progress != nil {
-					progress("compress", i+1, len(customFolders), message)
+					progress("compress", current, 0, filename)
 				}
 			},
 		)
@@ -339,14 +332,9 @@ func (b *Backup) Run(opts BackupOptions, progress ProgressCallback) (*BackupResu
 			continue
 		}
 
-		result.FilesProcessed += szResult.FilesProcessed
-		result.OriginalSize += szResult.OriginalSize
-		result.CompressedSize += szResult.CompressedSize
-	}
-
-	// Clean up temp directory if it exists
-	if _, err := os.Stat(tempPath); err == nil {
-		os.RemoveAll(tempPath)
+		result.FilesProcessed += compResult.FilesProcessed
+		result.OriginalSize += compResult.OriginalSize
+		result.CompressedSize += compResult.CompressedSize
 	}
 
 	// Phase 4: Save metadata
@@ -437,8 +425,8 @@ func (b *Backup) GetLatest() (*IndexEntry, error) {
 
 // Restore extracts a backup to the target directory.
 func (b *Backup) Restore(backupID, targetPath string, progress ProgressCallback) error {
-	if !b.sevenZip.IsAvailable() {
-		return fmt.Errorf("7-Zip not found")
+	if !b.compressor.IsAvailable() {
+		return fmt.Errorf("compressor not available")
 	}
 
 	index, err := LoadIndex(b.config.GetIndexPath())
@@ -458,27 +446,49 @@ func (b *Backup) Restore(backupID, targetPath string, progress ProgressCallback)
 		return fmt.Errorf("failed to create target directory: %w", err)
 	}
 
-	// Find all .7z archives in backup directory
+	// Find all archives in backup directory (supports multiple formats)
 	entries, err := os.ReadDir(backupPath)
 	if err != nil {
 		return fmt.Errorf("failed to read backup directory: %w", err)
 	}
 
+	// Supported archive extensions
+	archiveExts := map[string]bool{
+		".tar.zst": true,
+		".tar.gz":  true,
+		".tgz":     true,
+		".7z":      true,
+		".zip":     true,
+	}
+
 	for _, e := range entries {
-		if filepath.Ext(e.Name()) == ".7z" {
-			archivePath := filepath.Join(backupPath, e.Name())
+		name := e.Name()
+		ext := filepath.Ext(name)
 
+		// Check for .tar.zst or .tar.gz (double extension)
+		if ext == ".zst" || ext == ".gz" {
+			base := name[:len(name)-len(ext)]
+			if filepath.Ext(base) == ".tar" {
+				ext = filepath.Ext(base) + ext
+			}
+		}
+
+		if !archiveExts[ext] {
+			continue
+		}
+
+		archivePath := filepath.Join(backupPath, name)
+
+		if progress != nil {
+			progress("extract", 0, 0, fmt.Sprintf("Extracting %s...", name))
+		}
+
+		if err := b.compressor.Extract(archivePath, targetPath, func(msg string) {
 			if progress != nil {
-				progress("extract", 0, 0, fmt.Sprintf("Extracting %s...", e.Name()))
+				progress("extract", 0, 0, msg)
 			}
-
-			if err := b.sevenZip.ExtractArchive(archivePath, targetPath, func(msg string) {
-				if progress != nil {
-					progress("extract", 0, 0, msg)
-				}
-			}); err != nil {
-				return fmt.Errorf("failed to extract %s: %w", e.Name(), err)
-			}
+		}); err != nil {
+			return fmt.Errorf("failed to extract %s: %w", name, err)
 		}
 	}
 
