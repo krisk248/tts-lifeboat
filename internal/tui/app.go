@@ -11,6 +11,7 @@ import (
 	"github.com/kannan/tts-lifeboat/internal/app"
 	"github.com/kannan/tts-lifeboat/internal/backup"
 	"github.com/kannan/tts-lifeboat/internal/config"
+	"github.com/kannan/tts-lifeboat/internal/console"
 	"github.com/kannan/tts-lifeboat/internal/tui/styles"
 )
 
@@ -62,6 +63,9 @@ func (m Model) Init() tea.Cmd {
 
 // Run starts the TUI application.
 func Run() error {
+	// Set Windows console title
+	console.SetTitle(fmt.Sprintf("TTS Lifeboat v%s - Enterprise Backup", app.Version))
+
 	// Load configuration
 	cfg, err := config.Load("")
 	if err != nil {
