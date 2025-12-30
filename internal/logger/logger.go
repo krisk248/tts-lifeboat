@@ -1,4 +1,7 @@
+//go:build !legacy
+
 // Package logger provides structured logging using slog for tts-lifeboat.
+// This file is used for modern builds (Go 1.21+).
 package logger
 
 import (
