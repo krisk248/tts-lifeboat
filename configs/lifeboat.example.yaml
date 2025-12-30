@@ -1,0 +1,153 @@
+# TTS Lifeboat Configuration
+# ===========================
+# Created by Kannan
+#
+# Place this file as 'lifeboat.yaml' in the same directory as the lifeboat executable.
+# The lifeboat executable should be placed in your BACKUP folder, not the webapps folder.
+#
+# Example folder structure:
+#   C:\TTS\MyApp\
+#   ├── backup\                    <- Put lifeboat.exe and lifeboat.yaml HERE
+#   │   ├── lifeboat.exe
+#   │   └── lifeboat.yaml
+#   └── Tomcat\
+#       └── webapps\               <- Reference this path below
+#           ├── MyApp.war
+#           └── MyApp\
+
+# ===================
+# INSTANCE SETTINGS
+# ===================
+
+# Name for this Tomcat instance (used in logs and metadata)
+name: "My-Webapp"
+
+# Environment tag (for your reference: dev, staging, production)
+environment: "production"
+
+# ===================
+# PATH CONFIGURATION
+# ===================
+
+# REQUIRED: Full path to your Tomcat webapps directory
+# Windows example: "C:\\TTS\\MyApp\\Tomcat\\webapps"
+# Linux example: "/opt/tomcat/webapps"
+webapps_path: "C:\\TTS\\MyApp\\Tomcat\\webapps"
+
+# Backup destination (. = same folder as lifeboat.exe)
+backup_path: "."
+
+# ===================
+# WEBAPPS TO BACKUP
+# ===================
+
+# List specific webapps to backup.
+# Leave empty [] to backup ALL webapps in the webapps_path.
+# Include both .war files AND extracted folders if you want both.
+webapps:
+  # - "MyApp.war"
+  # - "MyApp"
+  # - "AnotherApp.war"
+  # - "AnotherApp"
+
+# ===================
+# CUSTOM FOLDERS
+# ===================
+
+# Additional folders to backup alongside webapps.
+# Use 'required: true' if backup should fail when folder is missing.
+# Use 'required: false' to skip if folder doesn't exist.
+custom_folders:
+  # - title: "Tomcat Config"
+  #   path: "C:\\TTS\\MyApp\\Tomcat\\conf"
+  #   required: true
+  #
+  # - title: "Application Logs"
+  #   path: "C:\\TTS\\MyApp\\Tomcat\\logs"
+  #   required: false
+  #   include:
+  #     - "catalina.*.log"
+  #
+  # - title: "Shared Configs"
+  #   path: "C:\\TTS\\shared-config"
+  #   required: false
+
+# ===================
+# RETENTION POLICY
+# ===================
+
+retention:
+  # Enable/disable automatic cleanup
+  enabled: true
+
+  # Delete backups older than this many days
+  days: 30
+
+  # Always keep at least this many backups (regardless of age)
+  min_keep: 5
+
+# ===================
+# COMPRESSION
+# ===================
+
+compression:
+  # Enable/disable compression
+  enabled: true
+
+  # Compression level (1-9, higher = smaller but slower)
+  level: 6
+
+  # Skip compression for these file types (already compressed)
+  skip_extensions:
+    - ".war"
+    - ".jar"
+    - ".zip"
+    - ".gz"
+    - ".tar.gz"
+    - ".tgz"
+    - ".7z"
+    - ".rar"
+
+# ===================
+# LOGGING
+# ===================
+
+logging:
+  # Log file path (relative to lifeboat.exe location)
+  path: "./logs/lifeboat.log"
+
+  # Log level: debug, info, warn, error
+  level: "info"
+
+  # Maximum log file size
+  max_size: "10MB"
+
+  # Maximum number of log files to keep
+  max_files: 5
+
+# ===================
+# TIPS
+# ===================
+#
+# 1. QUICK START:
+#    - Set 'name' to identify this instance
+#    - Set 'webapps_path' to your Tomcat webapps folder
+#    - Run: lifeboat config validate
+#    - Run: lifeboat backup --dry-run
+#    - Run: lifeboat backup --all
+#
+# 2. CHECKPOINT BACKUPS:
+#    Create important backups that never auto-delete:
+#    lifeboat backup --checkpoint --note "Release v2.0"
+#
+# 3. AUTOMATION:
+#    Schedule with cron or Task Scheduler:
+#    lifeboat backup --all --note "Scheduled backup"
+#
+# 4. RESTORE:
+#    lifeboat list              # See available backups
+#    lifeboat restore latest    # Restore most recent
+#
+# 5. CLEANUP:
+#    lifeboat cleanup           # Preview deletions
+#    lifeboat cleanup --force   # Actually delete

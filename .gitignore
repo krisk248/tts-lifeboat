@@ -1,0 +1,46 @@
+# Binaries (in root only)
+/lifeboat
+/lifeboat.exe
+lifeboat_*
+*.dll
+*.so
+*.dylib
+
+# Build artifacts
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Test coverage
+coverage.out
+coverage.html
+
+# Local config (user-specific)
+.claude/
+.moai/
+.serena/
+.mcp.json
+CLAUDE.md
+
+# Environment
+.env
+.env.*
