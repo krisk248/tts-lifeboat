@@ -67,6 +67,16 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
+      - name: Patch go.mod for Go 1.20 compatibility
+        run: |
+          # Remove toolchain directive (Go 1.20 doesn't understand it)
+          sed -i '/^toolchain /d' go.mod
+          # Set go version to 1.20
+          sed -i 's/^go 1\.[0-9]*/go 1.20/' go.mod
+          # Remove klauspost/compress (not used in legacy build)
+          sed -i '/klauspost\/compress/d' go.mod
+          cat go.mod
+
       - name: Build Legacy Linux
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
