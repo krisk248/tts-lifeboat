@@ -9,7 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  goreleaser:
+  # Modern build with full TUI (Go 1.24)
+  modern-build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -17,16 +18,153 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Go
+      - name: Set up Go 1.24 (Modern)
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build Modern Linux
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags="-s -w -X github.com/kannan/tts-lifeboat/internal/app.Version=${{ steps.version.outputs.VERSION }} -X github.com/kannan/tts-lifeboat/internal/app.Creator=Kannan" \
+            -trimpath \
+            -o dist/lifeboat_${{ steps.version.outputs.VERSION }}_linux_amd64 \
+            ./cmd/lifeboat
+
+      - name: Build Modern Windows
+        run: |
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+            -ldflags="-s -w -X github.com/kannan/tts-lifeboat/internal/app.Version=${{ steps.version.outputs.VERSION }} -X github.com/kannan/tts-lifeboat/internal/app.Creator=Kannan" \
+            -trimpath \
+            -o dist/lifeboat_${{ steps.version.outputs.VERSION }}_windows_amd64.exe \
+            ./cmd/lifeboat
+
+      - name: Upload Modern Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          distribution: goreleaser
-          version: latest
-          args: release --clean
+          name: modern-binaries
+          path: dist/*
+
+  # Legacy build for older systems like Windows 2008 R2 (Go 1.20)
+  legacy-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go 1.20 (Legacy)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Build Legacy Linux
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -tags legacy \
+            -ldflags="-s -w -X github.com/kannan/tts-lifeboat/internal/app.Version=${{ steps.version.outputs.VERSION }}-legacy -X github.com/kannan/tts-lifeboat/internal/app.Creator=Kannan" \
+            -trimpath \
+            -o dist/lifeboat_${{ steps.version.outputs.VERSION }}_linux_amd64_legacy \
+            ./cmd/lifeboat
+
+      - name: Build Legacy Windows (2008 R2 compatible)
+        run: |
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+            -tags legacy \
+            -ldflags="-s -w -X github.com/kannan/tts-lifeboat/internal/app.Version=${{ steps.version.outputs.VERSION }}-legacy -X github.com/kannan/tts-lifeboat/internal/app.Creator=Kannan" \
+            -trimpath \
+            -o dist/lifeboat_${{ steps.version.outputs.VERSION }}_windows_amd64_legacy.exe \
+            ./cmd/lifeboat
+
+      - name: Upload Legacy Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: legacy-binaries
+          path: dist/*
+
+  # Create release with all binaries
+  release:
+    needs: [modern-build, legacy-build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Download Modern Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: modern-binaries
+          path: dist/
+
+      - name: Download Legacy Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: legacy-binaries
+          path: dist/
+
+      - name: Create Archives
+        run: |
+          cd dist
+          # Modern builds
+          tar -czvf lifeboat_${{ steps.version.outputs.VERSION }}_linux_amd64.tar.gz lifeboat_${{ steps.version.outputs.VERSION }}_linux_amd64 -C .. README.md MANUAL.md configs/lifeboat.example.yaml
+          zip lifeboat_${{ steps.version.outputs.VERSION }}_windows_amd64.zip lifeboat_${{ steps.version.outputs.VERSION }}_windows_amd64.exe
+
+          # Legacy builds
+          tar -czvf lifeboat_${{ steps.version.outputs.VERSION }}_linux_amd64_legacy.tar.gz lifeboat_${{ steps.version.outputs.VERSION }}_linux_amd64_legacy -C .. README.md MANUAL.md configs/lifeboat.example.yaml
+          zip lifeboat_${{ steps.version.outputs.VERSION }}_windows_amd64_legacy.zip lifeboat_${{ steps.version.outputs.VERSION }}_windows_amd64_legacy.exe
+
+          # Generate checksums
+          sha256sum *.tar.gz *.zip > checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: "v${{ steps.version.outputs.VERSION }}"
+          body: |
+            ## TTS Lifeboat v${{ steps.version.outputs.VERSION }}
+
+            Enterprise backup solution for Tomcat web applications.
+
+            ### Downloads
+
+            **Modern Builds** (Full TUI - for Windows 10/11, modern Linux):
+            - `lifeboat_${{ steps.version.outputs.VERSION }}_linux_amd64.tar.gz` - Linux x64
+            - `lifeboat_${{ steps.version.outputs.VERSION }}_windows_amd64.zip` - Windows x64
+
+            **Legacy Builds** (Text-based menu - for Windows 2008 R2, older systems):
+            - `lifeboat_${{ steps.version.outputs.VERSION }}_linux_amd64_legacy.tar.gz` - Linux x64 (legacy)
+            - `lifeboat_${{ steps.version.outputs.VERSION }}_windows_amd64_legacy.zip` - Windows x64 (legacy)
+
+            ### Installation
+
+            1. Download the appropriate version for your system
+            2. Extract to your backup directory (next to the webapps folder)
+            3. Create `lifeboat.yaml` configuration file
+            4. Run `lifeboat` for interactive mode or `lifeboat backup` for CLI
+
+            ---
+
+            Created by Kannan
+
+            *"In case of sinking Tomcat, grab the Lifeboat!"*
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

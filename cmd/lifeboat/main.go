@@ -6,18 +6,17 @@ import (
 	"os"
 
 	"github.com/kannan/tts-lifeboat/internal/cli"
-	"github.com/kannan/tts-lifeboat/internal/tui"
 )
 
 func main() {
-	// Detect if we should run TUI or CLI
-	// TUI is launched when:
+	// Detect if we should run interactive UI or CLI
+	// Interactive UI is launched when:
 	// 1. No command-line arguments (just "lifeboat")
 	// 2. Running in interactive terminal
 	// 3. Not piped/redirected
 
-	if shouldRunTUI() {
-		if err := tui.Run(); err != nil {
+	if shouldRunUI() {
+		if err := runUI(); err != nil {
 			os.Exit(1)
 		}
 		return
@@ -27,8 +26,8 @@ func main() {
 	cli.Execute()
 }
 
-// shouldRunTUI determines if TUI should be launched.
-func shouldRunTUI() bool {
+// shouldRunUI determines if interactive UI should be launched.
+func shouldRunUI() bool {
 	// If there are command arguments, use CLI
 	if len(os.Args) > 1 {
 		return false
