@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/kannan/tts-lifeboat/internal/cli"
@@ -17,6 +18,10 @@ func main() {
 
 	if shouldRunUI() {
 		if err := runUI(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintln(os.Stderr, "")
+			fmt.Fprintln(os.Stderr, "Press Enter to exit...")
+			fmt.Scanln()
 			os.Exit(1)
 		}
 		return
