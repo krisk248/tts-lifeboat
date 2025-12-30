@@ -37,6 +37,11 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	// Create backup instance
 	b := backup.New(cfg)
 
+	// Check 7-Zip availability
+	if !b.IsSevenZipAvailable() {
+		return fmt.Errorf("7-Zip not found. Please install 7-Zip from https://www.7-zip.org/ or configure seven_zip.path in lifeboat.yaml")
+	}
+
 	// Handle "latest" keyword
 	if backupID == "latest" {
 		latest, err := b.GetLatest()

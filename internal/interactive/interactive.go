@@ -34,8 +34,8 @@ func Run() error {
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
-		clearScreen()
-		printBanner(cfg)
+		console.Clear()
+		printBanner(cfg, b)
 		printMenu()
 
 		choice := readChoice(reader)
@@ -65,13 +65,7 @@ func Run() error {
 	}
 }
 
-func clearScreen() {
-	// Clear screen using ANSI (works on most terminals)
-	// For Windows 2008, this may not work but won't show garbage
-	fmt.Print("\033[2J\033[H")
-}
-
-func printBanner(cfg *config.Config) {
+func printBanner(cfg *config.Config, b *backup.Backup) {
 	fmt.Println()
 	fmt.Println("  +============================================================+")
 	fmt.Println("  |                                                            |")
@@ -84,6 +78,14 @@ func printBanner(cfg *config.Config) {
 	// Instance info
 	fmt.Printf("  Instance:    %s\n", cfg.Name)
 	fmt.Printf("  Environment: %s\n", cfg.Environment)
+	fmt.Println()
+
+	// 7-Zip status
+	if b.IsSevenZipAvailable() {
+		fmt.Printf("  7-Zip:       Found (%s)\n", b.GetSevenZipPath())
+	} else {
+		fmt.Println("  7-Zip:       NOT FOUND - Please install 7-Zip!")
+	}
 	fmt.Println()
 
 	// Show backup stats
@@ -138,7 +140,7 @@ func readChoice(reader *bufio.Reader) int {
 }
 
 func runBackup(b *backup.Backup, reader *bufio.Reader, checkpoint bool) {
-	clearScreen()
+	console.Clear()
 	backupType := "Standard"
 	if checkpoint {
 		backupType = "Checkpoint"
@@ -148,7 +150,53 @@ func runBackup(b *backup.Backup, reader *bufio.Reader, checkpoint bool) {
 	fmt.Printf("  === %s Backup ===\n", backupType)
 	fmt.Println()
 
+	// Check 7-Zip availability
+	if !b.IsSevenZipAvailable() {
+		fmt.Println("  ERROR: 7-Zip not found!")
+		fmt.Println()
+		fmt.Println("  Please install 7-Zip from https://www.7-zip.org/")
+		fmt.Println("  Or configure the path in lifeboat.yaml under seven_zip.path")
+		fmt.Print("\n  Press Enter to continue...")
+		reader.ReadString('\n')
+		return
+	}
+
+	// Get available webapps
+	webapps, err := b.GetAvailableWebapps()
+	if err != nil {
+		fmt.Printf("  ERROR: %s\n", err.Error())
+		fmt.Print("\n  Press Enter to continue...")
+		reader.ReadString('\n')
+		return
+	}
+
+	if len(webapps) == 0 {
+		fmt.Println("  No webapps found in configured path.")
+		fmt.Print("\n  Press Enter to continue...")
+		reader.ReadString('\n')
+		return
+	}
+
+	// Show folder selection
+	selectedWebapps := selectWebapps(webapps, reader)
+	if len(selectedWebapps) == 0 {
+		fmt.Println()
+		fmt.Println("  No webapps selected. Backup cancelled.")
+		fmt.Print("\n  Press Enter to continue...")
+		reader.ReadString('\n')
+		return
+	}
+
 	// Ask for optional note
+	console.Clear()
+	fmt.Println()
+	fmt.Printf("  === %s Backup ===\n", backupType)
+	fmt.Println()
+	fmt.Printf("  Selected webapps: %d\n", len(selectedWebapps))
+	for _, name := range selectedWebapps {
+		fmt.Printf("    - %s\n", name)
+	}
+	fmt.Println()
 	fmt.Print("  Enter backup note (optional, press Enter to skip): ")
 	note, _ := reader.ReadString('\n')
 	note = strings.TrimSpace(note)
@@ -158,7 +206,9 @@ func runBackup(b *backup.Backup, reader *bufio.Reader, checkpoint bool) {
 	fmt.Println()
 
 	opts := backup.BackupOptions{
-		Note: note,
+		Note:            note,
+		Checkpoint:      checkpoint,
+		SelectedWebapps: selectedWebapps,
 	}
 
 	startTime := time.Now()
@@ -168,7 +218,7 @@ func runBackup(b *backup.Backup, reader *bufio.Reader, checkpoint bool) {
 			fmt.Printf("\r  [%s] %.0f%% (%d/%d) - %s          ",
 				phase, pct, current, total, truncate(message, 30))
 		} else {
-			fmt.Printf("\r  [%s] %s                              ", phase, message)
+			fmt.Printf("\r  [%s] %s                              ", phase, truncate(message, 40))
 		}
 	})
 
@@ -178,11 +228,6 @@ func runBackup(b *backup.Backup, reader *bufio.Reader, checkpoint bool) {
 	if err != nil {
 		fmt.Printf("  ERROR: %s\n", err.Error())
 	} else {
-		// Mark as checkpoint if requested
-		if checkpoint && result != nil {
-			b.MarkCheckpoint(result.ID, note)
-		}
-
 		fmt.Println("  +------------------------------------------------------------+")
 		fmt.Println("  |                   BACKUP COMPLETE!                         |")
 		fmt.Println("  +------------------------------------------------------------+")
@@ -195,6 +240,14 @@ func runBackup(b *backup.Backup, reader *bufio.Reader, checkpoint bool) {
 		if checkpoint {
 			fmt.Println("  Checkpoint:  Yes (Protected from auto-cleanup)")
 		}
+
+		if len(result.Errors) > 0 {
+			fmt.Println()
+			fmt.Println("  Warnings/Errors:")
+			for _, e := range result.Errors {
+				fmt.Printf("    - %s\n", e)
+			}
+		}
 	}
 
 	fmt.Println()
@@ -202,11 +255,109 @@ func runBackup(b *backup.Backup, reader *bufio.Reader, checkpoint bool) {
 	reader.ReadString('\n')
 }
 
+// selectWebapps shows folder selection screen and returns selected webapp names.
+func selectWebapps(webapps []backup.WebappInfo, reader *bufio.Reader) []string {
+	// Track selection state (all selected by default)
+	selected := make([]bool, len(webapps))
+	for i := range selected {
+		selected[i] = true
+	}
+
+	for {
+		console.Clear()
+		fmt.Println()
+		fmt.Println("  === Select Webapps to Backup ===")
+		fmt.Println()
+		fmt.Println("  Enter number to toggle, 'a' for all, 'n' for none, 'c' to continue:")
+		fmt.Println()
+
+		// Calculate total size
+		var totalSize int64
+		var selectedCount int
+
+		// Display webapps with selection status
+		for i, w := range webapps {
+			marker := "[ ]"
+			if selected[i] {
+				marker = "[X]"
+				totalSize += w.Size
+				selectedCount++
+			}
+
+			typeStr := "folder"
+			if w.IsWAR {
+				typeStr = "WAR"
+			}
+
+			fmt.Printf("  %s [%d] %-30s (%s, %s)\n",
+				marker,
+				i+1,
+				truncate(w.Name, 30),
+				typeStr,
+				backup.FormatSize(w.Size))
+		}
+
+		fmt.Println()
+		fmt.Printf("  Selected: %d webapps, Total size: %s\n", selectedCount, backup.FormatSize(totalSize))
+		fmt.Println()
+		fmt.Print("  Enter choice: ")
+
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+
+		switch input {
+		case "c", "continue", "":
+			// Return selected webapp names
+			var result []string
+			for i, w := range webapps {
+				if selected[i] {
+					result = append(result, w.Name)
+				}
+			}
+			return result
+
+		case "a", "all":
+			// Select all
+			for i := range selected {
+				selected[i] = true
+			}
+
+		case "n", "none":
+			// Deselect all
+			for i := range selected {
+				selected[i] = false
+			}
+
+		case "q", "quit", "cancel":
+			// Cancel - return empty
+			return nil
+
+		default:
+			// Try to parse as number
+			num, err := strconv.Atoi(input)
+			if err == nil && num >= 1 && num <= len(webapps) {
+				// Toggle selection
+				selected[num-1] = !selected[num-1]
+			}
+		}
+	}
+}
+
 func runRestore(b *backup.Backup, reader *bufio.Reader) {
-	clearScreen()
+	console.Clear()
 	fmt.Println()
 	fmt.Println("  === Restore Backup ===")
 	fmt.Println()
+
+	// Check 7-Zip availability
+	if !b.IsSevenZipAvailable() {
+		fmt.Println("  ERROR: 7-Zip not found!")
+		fmt.Println()
+		fmt.Println("  Please install 7-Zip from https://www.7-zip.org/")
+		fmt.Print("\n  Press Enter to continue...")
+		reader.ReadString('\n')
+		return
+	}
 
 	// List available backups
 	backups, err := b.List()
@@ -281,11 +432,7 @@ func runRestore(b *backup.Backup, reader *bufio.Reader) {
 	fmt.Println("  Restoring backup...")
 
 	err = b.Restore(selectedBackup.ID, targetPath, func(phase string, current, total int, message string) {
-		if total > 0 {
-			pct := float64(current) / float64(total) * 100
-			fmt.Printf("\r  [%s] %.0f%% (%d/%d) - %s          ",
-				phase, pct, current, total, truncate(message, 30))
-		}
+		fmt.Printf("\r  [%s] %s                              ", phase, truncate(message, 40))
 	})
 	if err != nil {
 		fmt.Printf("\n  ERROR: %s\n", err.Error())
@@ -298,7 +445,7 @@ func runRestore(b *backup.Backup, reader *bufio.Reader) {
 }
 
 func viewHistory(b *backup.Backup, reader *bufio.Reader) {
-	clearScreen()
+	console.Clear()
 	fmt.Println()
 	fmt.Println("  === Backup History ===")
 	fmt.Println()
@@ -342,7 +489,7 @@ func viewHistory(b *backup.Backup, reader *bufio.Reader) {
 }
 
 func runCleanup(retention *backup.RetentionManager, reader *bufio.Reader) {
-	clearScreen()
+	console.Clear()
 	fmt.Println()
 	fmt.Println("  === Cleanup Old Backups ===")
 	fmt.Println()

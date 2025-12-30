@@ -1,5 +1,5 @@
-# TTS Lifeboat Configuration
-# ===========================
+# TTS Lifeboat Configuration v0.1.5
+# =================================
 # Created by Kannan
 #
 # Place this file as 'lifeboat.yaml' in the same directory as the lifeboat executable.
@@ -30,9 +30,11 @@ environment: "production"
 # ===================
 
 # REQUIRED: Full path to your Tomcat webapps directory
-# Windows example: "C:\\TTS\\MyApp\\Tomcat\\webapps"
-# Linux example: "/opt/tomcat/webapps"
-webapps_path: "C:\\TTS\\MyApp\\Tomcat\\webapps"
+# Both slash types are supported:
+#   - Windows: "C:/TTS/MyApp/Tomcat/webapps" (recommended)
+#   - Windows: "C:\\TTS\\MyApp\\Tomcat\\webapps" (also works)
+#   - Linux: "/opt/tomcat/webapps"
+webapps_path: "C:/TTS/MyApp/Tomcat/webapps"
 
 # Backup destination (. = same folder as lifeboat.exe)
 backup_path: "."
@@ -59,17 +61,17 @@ webapps:
 # Use 'required: false' to skip if folder doesn't exist.
 custom_folders:
   # - title: "Tomcat Config"
-  #   path: "C:\\TTS\\MyApp\\Tomcat\\conf"
+  #   path: "C:/TTS/MyApp/Tomcat/conf"
   #   required: true
   #
   # - title: "Application Logs"
-  #   path: "C:\\TTS\\MyApp\\Tomcat\\logs"
+  #   path: "C:/TTS/MyApp/Tomcat/logs"
   #   required: false
   #   include:
   #     - "catalina.*.log"
   #
   # - title: "Shared Configs"
-  #   path: "C:\\TTS\\shared-config"
+  #   path: "C:/TTS/shared-config"
   #   required: false
 
 # ===================
@@ -87,17 +89,43 @@ retention:
   min_keep: 5
 
 # ===================
-# COMPRESSION
+# 7-ZIP SETTINGS
 # ===================
+# TTS Lifeboat uses external 7-Zip for compression.
+# This provides better compression and lower memory usage.
+
+seven_zip:
+  # Path to 7z.exe (leave empty to auto-detect)
+  # Auto-detects from:
+  #   - C:\Program Files\7-Zip\7z.exe
+  #   - C:\Program Files (x86)\7-Zip\7z.exe
+  #   - System PATH
+  path: ""
+
+  # Compression level (0-9)
+  # 0 = Store (no compression)
+  # 1-3 = Fast
+  # 5 = Normal (default, good balance)
+  # 7-9 = Maximum (slower but smaller)
+  level: 5
+
+  # Number of CPU threads to use
+  # 1 = Single thread (low memory, slower)
+  # 0 = Auto (all cores)
+  threads: 1
+
+# ===================
+# COMPRESSION (LEGACY)
+# ===================
+# NOTE: These settings are for reference only.
+# v0.1.5+ uses external 7-Zip instead of internal compression.
 
 compression:
-  # Enable/disable compression
   enabled: true
+  level: 5
 
-  # Compression level (1-9, higher = smaller but slower)
-  level: 6
-
-  # Skip compression for these file types (already compressed)
+  # Files with these extensions are already compressed
+  # and will be stored without re-compression
   skip_extensions:
     - ".war"
     - ".jar"
@@ -129,25 +157,35 @@ logging:
 # TIPS
 # ===================
 #
-# 1. QUICK START:
+# 1. PREREQUISITES:
+#    - Install 7-Zip from https://www.7-zip.org/
+#    - Verify: 7z --help
+#
+# 2. QUICK START:
 #    - Set 'name' to identify this instance
 #    - Set 'webapps_path' to your Tomcat webapps folder
 #    - Run: lifeboat config validate
 #    - Run: lifeboat backup --dry-run
 #    - Run: lifeboat backup --all
 #
-# 2. CHECKPOINT BACKUPS:
+# 3. INTERACTIVE MODE:
+#    Just run 'lifeboat' (without arguments) for interactive UI
+#    - Select webapps before backup
+#    - View backup history
+#    - Restore and cleanup
+#
+# 4. CHECKPOINT BACKUPS:
 #    Create important backups that never auto-delete:
 #    lifeboat backup --checkpoint --note "Release v2.0"
 #
-# 3. AUTOMATION:
+# 5. AUTOMATION:
 #    Schedule with cron or Task Scheduler:
 #    lifeboat backup --all --note "Scheduled backup"
 #
-# 4. RESTORE:
+# 6. RESTORE:
 #    lifeboat list              # See available backups
 #    lifeboat restore latest    # Restore most recent
 #
-# 5. CLEANUP:
+# 7. CLEANUP:
 #    lifeboat cleanup           # Preview deletions
 #    lifeboat cleanup --force   # Actually delete

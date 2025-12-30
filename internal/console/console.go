@@ -7,3 +7,10 @@ package console
 func SetTitle(title string) {
 	setTitle(title)
 }
+
+// Clear clears the console screen.
+// On Windows, this uses cmd /c cls or Windows Console API.
+// On Linux/Unix, this uses ANSI escape codes.
+func Clear() {
+	ClearScreen()
+}

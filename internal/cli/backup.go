@@ -56,16 +56,31 @@ func runBackup(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
+	// Check 7-Zip availability
+	if !b.IsSevenZipAvailable() {
+		return fmt.Errorf("7-Zip not found. Please install 7-Zip from https://www.7-zip.org/ or configure seven_zip.path in lifeboat.yaml")
+	}
+
 	// Progress callback for CLI
 	progress := func(phase string, current, total int, message string) {
 		switch phase {
-		case "collect":
-			fmt.Printf("📂 Collecting files: %s\n", message)
-		case "compress":
+		case "init":
+			fmt.Printf("📁 %s\n", message)
+		case "copy":
 			if total > 0 {
 				pct := float64(current) / float64(total) * 100
-				fmt.Printf("\r💾 Processing: [%3.0f%%] %s", pct, truncateString(message, 50))
+				fmt.Printf("\r📋 Copying: [%3.0f%%] %s            ", pct, truncateString(message, 40))
+			} else {
+				fmt.Printf("\r📋 Copying: %s            ", truncateString(message, 50))
 			}
+		case "compress":
+			if total > 0 {
+				fmt.Printf("\n📦 Compressing: (%d/%d) %s\n", current, total, truncateString(message, 40))
+			} else {
+				fmt.Printf("\r📦 Compressing: %s            ", truncateString(message, 50))
+			}
+		case "custom":
+			fmt.Printf("\n📂 Custom folders: %s\n", message)
 		case "metadata":
 			fmt.Printf("\n📝 %s\n", message)
 		}
