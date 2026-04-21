@@ -1,227 +1,130 @@
 # TTS Lifeboat
 
-> Enterprise backup solution for Tomcat web applications
-
-[![Go Version](https://img.shields.io/badge/Go-1.20%2B-blue.svg)](https://go.dev/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+> Simple menu-driven backup tool for Tomcat webapps.
 
 ```
-████████╗████████╗███████╗    ██╗     ██╗███████╗███████╗██████╗  ██████╗  █████╗ ████████╗
-╚══██╔══╝╚══██╔══╝██╔════╝    ██║     ██║██╔════╝██╔════╝██╔══██╗██╔═══██╗██╔══██╗╚══██╔══╝
-   ██║      ██║   ███████╗    ██║     ██║█████╗  █████╗  ██████╔╝██║   ██║███████║   ██║
-   ██║      ██║   ╚════██║    ██║     ██║██╔══╝  ██╔══╝  ██╔══██╗██║   ██║██╔══██║   ██║
-   ██║      ██║   ███████║    ███████╗██║██║     ███████╗██████╔╝╚██████╔╝██║  ██║   ██║
-   ╚═╝      ╚═╝   ╚══════╝    ╚══════╝╚═╝╚═╝     ╚══════╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝   ╚═╝
+===============================================
+   TTS LIFEBOAT v0.3.0
+   Created by Kannan from TTS
+   Project: IPO-MIGRATION
+===============================================
 
-                        "Your Tomcat's Best Friend"
-                            Created by Kannan
+What would you like to do?
+
+  1. Create New Backup
+  2. View Backup History
+  3. Cleanup Old Backups (older than 30 days)
+  4. Exit
 ```
 
-## Features
+One binary. One TOML file. One menu. That's it.
 
-- **Intelligent Backup** - Smart compression that skips already-compressed files (WAR, JAR, ZIP)
-- **Checkpoint System** - Mark important backups that never auto-delete
-- **Retention Policy** - Automatic cleanup with configurable retention days
-- **Custom Folders** - Backup Tomcat config, logs, and other folders alongside webapps
-- **Hybrid Interface** - TUI for interactive use, CLI for automation
-- **Cross-Platform** - Windows (2008 R2, 10, 11) and Linux (RHEL 8+)
+## Install
 
-## Quick Start
+1. Copy `lifeboat.exe` (Windows) or `lifeboat` (Linux) into a folder next to
+   your Tomcat install, e.g. `C:\TTS\MyApp\backup\`.
+2. Run it once in that folder to generate a starter config:
 
-### 1. Download
+   ```
+   lifeboat init
+   ```
 
-Download the appropriate binary for your platform:
+3. Edit `lifeboat.toml` and set `name` and `webapps_path`.
+4. Run `lifeboat` (no arguments) to open the menu.
 
-| Platform | Binary |
-|----------|--------|
-| Windows x64 | `lifeboat_windows_amd64.exe` |
-| Windows ARM64 | `lifeboat_windows_arm64.exe` |
-| Linux x64 | `lifeboat_linux_amd64` |
-| Linux ARM64 | `lifeboat_linux_arm64` |
+## Configuration (`lifeboat.toml`)
 
-### 2. Place in Backup Folder
+Six fields, flat, no sections:
 
-Place `lifeboat.exe` (or `lifeboat`) in your backup destination folder:
+```toml
+name          = "IPO-MIGRATION"
+webapps_path  = "C:/TTS/IPO-MIGRATION/Tomcat/webapps"
+backup_path   = "."          # . = same folder as lifeboat.exe
+compression   = false        # false = plain copy, true = .tar.zst
+retention_days = 30          # 0 = keep forever
+extra_folders = []           # optional: Tomcat conf, shared configs, ...
+```
+
+`compression` defaults to `false` on Windows and `true` on Linux when you run
+`lifeboat init`. Flip it any time.
+
+## What each menu option does
+
+- **1. Create New Backup** - Lists every entry in `webapps_path` with a number
+  and size. Type the numbers you want (`1,3,10`) or press Enter for all. Items
+  are copied (or compressed to `.tar.zst`) into
+  `backup_path/YYYYMMDD/HHMM/`. Extra folders are backed up alongside.
+
+- **2. View Backup History** - Lists every past backup, newest first, with
+  timestamp, size, and path.
+
+- **3. Cleanup Old Backups** - Previews backups older than `retention_days`,
+  asks for confirmation, then deletes them. Empty date folders are removed too.
+
+- **4. Exit** - Quits.
+
+## Where things live
 
 ```
-C:\TTS\REManagement\UAE\ADX\
-├── backup\                    ← Place lifeboat.exe HERE
+C:\TTS\MyApp\
+├── backup\
 │   ├── lifeboat.exe
-│   ├── lifeboat.yaml          ← Create config here
-│   └── logs\
-│
+│   ├── lifeboat.toml
+│   ├── logs\
+│   │   └── lifeboat.log         ← every action is logged here
+│   └── 20260421\
+│       ├── 2117\                ← one backup: 21 Apr 2026 at 21:17
+│       │   ├── AIWS\            ← plain copy (compression=false)
+│       │   ├── IWS\
+│       │   ├── app.war
+│       │   └── conf\            ← from extra_folders
+│       └── 2340\
+│           ├── AIWS.tar.zst     ← archive (compression=true)
+│           └── ...
 └── Tomcat\
-    └── webapps\               ← Your webapps (full path in YAML)
+    └── webapps\                 ← referenced by webapps_path
 ```
 
-### 3. Create Configuration
+## Automation (optional)
 
-Create `lifeboat.yaml` in the same folder:
+Scheduled non-interactive backup of everything:
 
-```yaml
-# Minimal configuration
-name: "UAE-ADX"
-environment: "production"
+**Windows Task Scheduler**
 
-webapps_path: "C:\\TTS\\REManagement\\UAE\\ADX\\Tomcat\\webapps"
-backup_path: "."
+- Program: `lifeboat.exe`
+- Start in: `C:\TTS\MyApp\backup`
+- Arguments: leave blank, pipe stdin via a `.cmd` wrapper:
 
-retention:
-  days: 30
-  min_keep: 5
+  ```cmd
+  @echo off
+  cd /d C:\TTS\MyApp\backup
+  (echo 1 & echo. & echo.) | lifeboat.exe
+  ```
+
+  (`1` = New Backup, blank = all items, blank = Press Enter to continue.)
+
+**Linux cron**
+
+```
+0 2 * * * cd /opt/tts/backup && printf '1\n\n\n4\n' | ./lifeboat >> /dev/null
 ```
 
-Or generate a template:
+## Build from source
+
+Requires Go 1.21+.
 
 ```bash
-lifeboat config init
+go build -o lifeboat ./cmd/lifeboat                                # current OS
+GOOS=windows GOARCH=amd64 go build -o lifeboat.exe ./cmd/lifeboat  # cross
 ```
 
-### 4. Run Backup
+Dependencies (two):
 
-**Interactive TUI:**
-```bash
-lifeboat
-```
-
-**CLI Backup:**
-```bash
-lifeboat backup --all
-lifeboat backup --all --note "Pre-deployment"
-lifeboat backup --checkpoint --note "Release v2.0"
-```
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `lifeboat` | Launch interactive TUI |
-| `lifeboat backup --all` | Backup all configured apps |
-| `lifeboat backup --checkpoint` | Create checkpoint (never auto-deletes) |
-| `lifeboat restore latest` | Restore most recent backup |
-| `lifeboat restore <id>` | Restore specific backup |
-| `lifeboat list` | List all backups |
-| `lifeboat cleanup --force` | Remove expired backups |
-| `lifeboat checkpoint <id>` | Mark backup as checkpoint |
-| `lifeboat config validate` | Validate configuration |
-| `lifeboat version --verbose` | Show version with Easter egg |
-
-## Configuration
-
-### Full Configuration Example
-
-```yaml
-# Instance identification
-name: "UAE-ADX"
-environment: "production"
-
-# Paths
-webapps_path: "C:\\TTS\\REManagement\\UAE\\ADX\\Tomcat\\webapps"
-backup_path: "."
-
-# Specific webapps to backup (empty = all)
-webapps:
-  - "AIWS.war"
-  - "AIWS"
-  - "IWS"
-  - "MEET-ADX"
-
-# Additional folders
-custom_folders:
-  - title: "Tomcat Config"
-    path: "C:\\TTS\\REManagement\\UAE\\ADX\\Tomcat\\conf"
-    required: true
-  - title: "Shared Configs"
-    path: "C:\\TTS\\shared-config"
-    required: false
-
-# Retention policy
-retention:
-  enabled: true
-  days: 30
-  min_keep: 5
-
-# Compression
-compression:
-  enabled: true
-  level: 6
-  skip_extensions:
-    - ".war"
-    - ".jar"
-    - ".zip"
-    - ".gz"
-
-# Logging
-logging:
-  path: "./logs/lifeboat.log"
-  level: "info"
-```
-
-## Backup Structure
-
-```
-backup/
-├── lifeboat.exe
-├── lifeboat.yaml
-├── index.json                    ← Quick lookup index
-├── logs/
-│   └── lifeboat.log
-├── 20251230/
-│   ├── 1104/
-│   │   ├── webapp.tar.gz         ← Compressed webapps
-│   │   ├── custom.tar.gz         ← Custom folders
-│   │   └── metadata.json         ← Backup metadata
-│   └── 1530/
-│       └── ...
-└── 20251228_Release_v2/          ← Checkpoint backup
-    └── ...
-```
-
-## Building from Source
-
-### Requirements
-- Go 1.20+ (for Windows 2008 R2 / RHEL 8 compatibility)
-- Go 1.24+ (for modern systems)
-
-### Build
-
-```bash
-# Clone repository
-git clone https://github.com/kannan/tts-lifeboat.git
-cd tts-lifeboat
-
-# Get dependencies
-go mod tidy
-
-# Build for current platform
-go build -o lifeboat ./cmd/lifeboat
-
-# Cross-compile
-GOOS=windows GOARCH=amd64 go build -o lifeboat_windows_amd64.exe ./cmd/lifeboat
-GOOS=linux GOARCH=amd64 go build -o lifeboat_linux_amd64 ./cmd/lifeboat
-```
-
-### Using GoReleaser
-
-```bash
-goreleaser release --snapshot --clean
-```
-
-## Platform Support
-
-| Platform | Go Version | Notes |
-|----------|------------|-------|
-| Windows 2008 R2 | Go 1.20 | Use legacy binary |
-| Windows 10/11 | Go 1.24 | Use modern binary |
-| RHEL 8 | Go 1.20 | Use legacy binary |
-| Modern Linux | Go 1.24 | Use modern binary |
-
-## Author
-
-**Kannan**
-
-*"In case of sinking Tomcat, grab the Lifeboat!"*
+- `github.com/BurntSushi/toml` - config parsing
+- `github.com/klauspost/compress` - zstd encoder for `compression = true`
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT.
+
+*"In case of sinking Tomcat, grab the Lifeboat."*

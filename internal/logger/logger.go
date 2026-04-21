@@ -1,121 +1,61 @@
-//go:build !legacy
-
-// Package logger provides structured logging using slog for tts-lifeboat.
-// This file is used for modern builds (Go 1.21+).
+// Package logger writes human-readable log lines to both the terminal and
+// a file under <backup_path>/logs/lifeboat.log.
 package logger
 
 import (
+	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
+	"time"
 )
 
-var (
-	// Default is the default logger instance.
-	Default *slog.Logger
-)
+var fileWriter io.WriteCloser
 
-func init() {
-	// Initialize with console output by default
-	Default = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-}
-
-// Config holds logger configuration.
-type Config struct {
-	Path     string
-	Level    string
-	MaxSize  int64
-	MaxFiles int
-	Console  bool
-}
-
-// Init initializes the logger with the given configuration.
-func Init(cfg Config) error {
-	var level slog.Level
-	switch strings.ToLower(cfg.Level) {
-	case "debug":
-		level = slog.LevelDebug
-	case "info":
-		level = slog.LevelInfo
-	case "warn", "warning":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
+// Init opens logs/lifeboat.log under backupDir. Safe to call multiple times;
+// it replaces the previous writer.
+func Init(backupDir string) error {
+	if fileWriter != nil {
+		_ = fileWriter.Close()
+		fileWriter = nil
 	}
-
-	opts := &slog.HandlerOptions{
-		Level: level,
+	dir := filepath.Join(backupDir, "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
 	}
-
-	var writers []io.Writer
-
-	// Console output
-	if cfg.Console {
-		writers = append(writers, os.Stdout)
+	f, err := os.OpenFile(filepath.Join(dir, "lifeboat.log"),
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
 	}
-
-	// File output
-	if cfg.Path != "" {
-		// Create log directory if it doesn't exist
-		logDir := filepath.Dir(cfg.Path)
-		if err := os.MkdirAll(logDir, 0755); err != nil {
-			return err
-		}
-
-		file, err := os.OpenFile(cfg.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			return err
-		}
-		writers = append(writers, file)
-	}
-
-	if len(writers) == 0 {
-		writers = append(writers, os.Stdout)
-	}
-
-	var writer io.Writer
-	if len(writers) == 1 {
-		writer = writers[0]
-	} else {
-		writer = io.MultiWriter(writers...)
-	}
-
-	Default = slog.New(slog.NewTextHandler(writer, opts))
+	fileWriter = f
 	return nil
 }
 
-// Debug logs a debug message.
-func Debug(msg string, args ...any) {
-	Default.Debug(msg, args...)
+// Close flushes and closes the log file.
+func Close() {
+	if fileWriter != nil {
+		_ = fileWriter.Close()
+		fileWriter = nil
+	}
 }
 
-// Info logs an info message.
-func Info(msg string, args ...any) {
-	Default.Info(msg, args...)
+func write(level, msg string) {
+	line := fmt.Sprintf("%s [%s] %s\n",
+		time.Now().Format("2006-01-02 15:04:05"), level, msg)
+	if fileWriter != nil {
+		_, _ = fileWriter.Write([]byte(line))
+	}
 }
 
-// Warn logs a warning message.
-func Warn(msg string, args ...any) {
-	Default.Warn(msg, args...)
+// Info writes an INFO line to the log file only (terminal stays clean).
+func Info(format string, a ...any) {
+	write("INFO", fmt.Sprintf(format, a...))
 }
 
-// Error logs an error message.
-func Error(msg string, args ...any) {
-	Default.Error(msg, args...)
-}
-
-// WithGroup returns a logger with the given group name.
-func WithGroup(name string) *slog.Logger {
-	return Default.WithGroup(name)
-}
-
-// With returns a logger with the given attributes.
-func With(args ...any) *slog.Logger {
-	return Default.With(args...)
+// Error writes an ERROR line to both file and stderr.
+func Error(format string, a ...any) {
+	msg := fmt.Sprintf(format, a...)
+	write("ERROR", msg)
+	fmt.Fprintln(os.Stderr, "ERROR:", msg)
 }

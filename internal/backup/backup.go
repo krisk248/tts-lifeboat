@@ -1,511 +1,409 @@
+// Package backup implements the three operations the menu exposes:
+// NewBackup, History, Cleanup.
 package backup
 
 import (
+	"archive/tar"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/kannan/tts-lifeboat/internal/config"
 	"github.com/kannan/tts-lifeboat/internal/logger"
 )
 
-// BackupOptions configures backup behavior.
-type BackupOptions struct {
-	Note             string
-	Checkpoint       bool
-	DryRun           bool
-	SelectedWebapps  []string // Selected webapps to backup (empty = all)
-	SelectedCustom   []string // Selected custom folders to backup (empty = all)
-}
-
-// BackupResult holds the result of a backup operation.
-type BackupResult struct {
-	ID             string
-	Path           string
-	StartTime      time.Time
-	EndTime        time.Time
-	Duration       time.Duration
-	FilesCollected int
-	FilesProcessed int
-	OriginalSize   int64
-	CompressedSize int64
-	Errors         []string
-	Success        bool
-}
-
-// Backup orchestrates the backup process.
-type Backup struct {
-	config     *config.Config
-	collector  *Collector
-	compressor *StreamingCompressor
-}
-
-// New creates a new backup instance.
-func New(cfg *config.Config) *Backup {
-	return &Backup{
-		config:     cfg,
-		collector:  NewCollector(cfg),
-		compressor: NewStreamingCompressor(cfg),
-	}
-}
-
-// ProgressCallback is called during backup to report progress.
-type ProgressCallback func(phase string, current, total int, message string)
-
-// GetAvailableWebapps returns list of webapps available for backup.
-func (b *Backup) GetAvailableWebapps() ([]WebappInfo, error) {
-	webappsPath := config.NormalizePath(b.config.WebappsPath)
-
-	if webappsPath == "" {
-		return nil, fmt.Errorf("webapps_path not configured in lifeboat.yaml")
-	}
-
-	entries, err := os.ReadDir(webappsPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read webapps directory: %w", err)
-	}
-
-	var webapps []WebappInfo
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) == ".war" {
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-
-			webapp := WebappInfo{
-				Name:  entry.Name(),
-				Path:  filepath.Join(webappsPath, entry.Name()),
-				IsWAR: filepath.Ext(entry.Name()) == ".war",
-			}
-
-			if entry.IsDir() {
-				// Calculate folder size
-				webapp.Size = calculateFolderSize(webapp.Path)
-			} else {
-				webapp.Size = info.Size()
-			}
-
-			webapps = append(webapps, webapp)
-		}
-	}
-
-	return webapps, nil
-}
-
-// WebappInfo contains information about a webapp.
-type WebappInfo struct {
+// Item is one webapp entry (file or directory) the user can select.
+type Item struct {
 	Name  string
 	Path  string
 	Size  int64
-	IsWAR bool
+	IsDir bool
 }
 
-// calculateFolderSize recursively calculates folder size.
-func calculateFolderSize(path string) int64 {
-	var size int64
-	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+// ListWebapps returns entries in webapps_path, sorted by name.
+func ListWebapps(cfg *config.Config) ([]Item, error) {
+	entries, err := os.ReadDir(cfg.WebappsPath)
+	if err != nil {
+		return nil, fmt.Errorf("read webapps folder: %w", err)
+	}
+	items := make([]Item, 0, len(entries))
+	for _, e := range entries {
+		full := filepath.Join(cfg.WebappsPath, e.Name())
+		it := Item{Name: e.Name(), Path: full, IsDir: e.IsDir()}
+		if e.IsDir() {
+			it.Size = dirSize(full)
+		} else if info, err := e.Info(); err == nil {
+			it.Size = info.Size()
+		}
+		items = append(items, it)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	return items, nil
+}
+
+// Run executes a backup of the given items plus extra_folders from the config.
+// Destination folder = <backup_path>/YYYYMMDD/HHMM.
+// Returns the destination path and total bytes copied.
+func Run(cfg *config.Config, items []Item, progress func(step, total int, name string)) (string, int64, error) {
+	now := time.Now()
+	dest := filepath.Join(cfg.BackupPath, now.Format("20060102"), now.Format("1504"))
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return "", 0, err
+	}
+	logger.Info("backup start dest=%s items=%d compression=%v", dest, len(items), cfg.Compression)
+
+	total := len(items) + len(cfg.ExtraFolders)
+	var bytes int64
+	step := 0
+
+	for _, it := range items {
+		step++
+		if progress != nil {
+			progress(step, total, it.Name)
+		}
+		n, err := copyOne(it.Path, it.Name, dest, cfg.Compression)
 		if err != nil {
+			logger.Error("copy %s: %v", it.Name, err)
+			return dest, bytes, err
+		}
+		bytes += n
+		logger.Info("copied %s (%s)", it.Name, humanSize(n))
+	}
+
+	for _, folder := range cfg.ExtraFolders {
+		step++
+		name := filepath.Base(folder)
+		if progress != nil {
+			progress(step, total, name)
+		}
+		if _, err := os.Stat(folder); err != nil {
+			logger.Error("extra folder %s missing, skipping", folder)
+			continue
+		}
+		n, err := copyOne(folder, name, dest, cfg.Compression)
+		if err != nil {
+			logger.Error("copy extra %s: %v", folder, err)
+			return dest, bytes, err
+		}
+		bytes += n
+		logger.Info("copied extra %s (%s)", name, humanSize(n))
+	}
+
+	logger.Info("backup done dest=%s size=%s", dest, humanSize(bytes))
+	return dest, bytes, nil
+}
+
+// copyOne copies a file or directory into dest, optionally as a .tar.zst archive.
+// Returns bytes of original data read.
+func copyOne(src, name, dest string, compress bool) (int64, error) {
+	info, err := os.Stat(src)
+	if err != nil {
+		return 0, err
+	}
+	if compress {
+		target := filepath.Join(dest, name+".tar.zst")
+		return writeTarZst(src, target)
+	}
+	if info.IsDir() {
+		return copyDir(src, filepath.Join(dest, name))
+	}
+	return copyFile(src, filepath.Join(dest, name))
+}
+
+func copyFile(src, dst string) (int64, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return 0, err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return 0, err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return 0, err
+	}
+	defer out.Close()
+	return io.Copy(out, in)
+}
+
+func copyDir(src, dst string) (int64, error) {
+	var total int64
+	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode()|0o755)
+		}
+		n, err := copyFile(path, target)
+		if err != nil {
+			return err
+		}
+		total += n
+		return nil
+	})
+	return total, err
+}
+
+func writeTarZst(src, archive string) (int64, error) {
+	if err := os.MkdirAll(filepath.Dir(archive), 0o755); err != nil {
+		return 0, err
+	}
+	out, err := os.Create(archive)
+	if err != nil {
+		return 0, err
+	}
+	defer out.Close()
+
+	zw, err := zstd.NewWriter(out)
+	if err != nil {
+		return 0, err
+	}
+	defer zw.Close()
+
+	tw := tar.NewWriter(zw)
+	defer tw.Close()
+
+	info, err := os.Stat(src)
+	if err != nil {
+		return 0, err
+	}
+
+	var total int64
+	if !info.IsDir() {
+		n, err := addFileToTar(tw, src, filepath.Base(src))
+		return n, err
+	}
+
+	err = filepath.Walk(src, func(path string, fi os.FileInfo, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
 			return nil
 		}
-		if !info.IsDir() {
-			size += info.Size()
+		hdr, err := tar.FileInfoHeader(fi, "")
+		if err != nil {
+			return err
+		}
+		hdr.Name = filepath.ToSlash(rel)
+		if fi.IsDir() {
+			hdr.Name += "/"
+			return tw.WriteHeader(hdr)
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		n, err := io.Copy(tw, in)
+		in.Close()
+		if err != nil {
+			return err
+		}
+		total += n
+		return nil
+	})
+	return total, err
+}
+
+func addFileToTar(tw *tar.Writer, path, name string) (int64, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	hdr, err := tar.FileInfoHeader(fi, "")
+	if err != nil {
+		return 0, err
+	}
+	hdr.Name = name
+	if err := tw.WriteHeader(hdr); err != nil {
+		return 0, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return io.Copy(tw, f)
+}
+
+// HistoryEntry describes one past backup directory.
+type HistoryEntry struct {
+	Path string
+	When time.Time
+	Size int64
+}
+
+// History walks <backup_path>/YYYYMMDD/HHMM and returns entries newest first.
+func History(cfg *config.Config) ([]HistoryEntry, error) {
+	var entries []HistoryEntry
+	dayEntries, err := os.ReadDir(cfg.BackupPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return entries, nil
+		}
+		return nil, err
+	}
+	for _, day := range dayEntries {
+		if !day.IsDir() || !isDayFolder(day.Name()) {
+			continue
+		}
+		dayPath := filepath.Join(cfg.BackupPath, day.Name())
+		subs, err := os.ReadDir(dayPath)
+		if err != nil {
+			continue
+		}
+		for _, t := range subs {
+			if !t.IsDir() || !isTimeFolder(t.Name()) {
+				continue
+			}
+			full := filepath.Join(dayPath, t.Name())
+			when, err := time.ParseInLocation("200601021504", day.Name()+t.Name(), time.Local)
+			if err != nil {
+				continue
+			}
+			entries = append(entries, HistoryEntry{
+				Path: full,
+				When: when,
+				Size: dirSize(full),
+			})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].When.After(entries[j].When) })
+	return entries, nil
+}
+
+// Cleanup deletes history entries older than retention_days.
+// If dryRun is true nothing is removed. Returns deleted entries and bytes freed.
+func Cleanup(cfg *config.Config, dryRun bool) ([]HistoryEntry, int64, error) {
+	if cfg.RetentionDays <= 0 {
+		return nil, 0, nil
+	}
+	entries, err := History(cfg)
+	if err != nil {
+		return nil, 0, err
+	}
+	cutoff := time.Now().AddDate(0, 0, -cfg.RetentionDays)
+	var deleted []HistoryEntry
+	var freed int64
+	for _, e := range entries {
+		if !e.When.Before(cutoff) {
+			continue
+		}
+		deleted = append(deleted, e)
+		freed += e.Size
+		if dryRun {
+			continue
+		}
+		if err := os.RemoveAll(e.Path); err != nil {
+			logger.Error("delete %s: %v", e.Path, err)
+			continue
+		}
+		logger.Info("deleted old backup %s (%s)", e.Path, humanSize(e.Size))
+		parent := filepath.Dir(e.Path)
+		if empty, _ := isEmpty(parent); empty {
+			_ = os.Remove(parent)
+		}
+	}
+	return deleted, freed, nil
+}
+
+func isDayFolder(name string) bool {
+	if len(name) != 8 {
+		return false
+	}
+	_, err := time.Parse("20060102", name)
+	return err == nil
+}
+
+func isTimeFolder(name string) bool {
+	if len(name) != 4 {
+		return false
+	}
+	_, err := time.Parse("1504", name)
+	return err == nil
+}
+
+func isEmpty(dir string) (bool, error) {
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	return len(es) == 0, nil
+}
+
+func dirSize(path string) int64 {
+	var n int64
+	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			n += info.Size()
 		}
 		return nil
 	})
-	return size
+	return n
 }
 
-// GetAvailableCustomFolders returns list of configured custom folders.
-func (b *Backup) GetAvailableCustomFolders() []CustomFolderInfo {
-	var folders []CustomFolderInfo
+// HumanSize formats bytes as KB/MB/GB for the UI.
+func HumanSize(b int64) string { return humanSize(b) }
 
-	for _, folder := range b.config.CustomFolders {
-		info := CustomFolderInfo{
-			Title:    folder.Title,
-			Path:     config.NormalizePath(folder.Path),
-			Required: folder.Required,
-			Exists:   false,
-		}
-
-		if stat, err := os.Stat(info.Path); err == nil {
-			info.Exists = true
-			if stat.IsDir() {
-				info.Size = calculateFolderSize(info.Path)
-			} else {
-				info.Size = stat.Size()
-			}
-		}
-
-		folders = append(folders, info)
+func humanSize(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
 	}
-
-	return folders
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-// CustomFolderInfo contains information about a custom folder.
-type CustomFolderInfo struct {
-	Title    string
-	Path     string
-	Size     int64
-	Required bool
-	Exists   bool
-}
-
-// IsCompressorAvailable checks if the compressor is ready.
-// For modern builds, this always returns true (pure Go).
-// For legacy builds, this checks if 7-Zip is available.
-func (b *Backup) IsCompressorAvailable() bool {
-	return b.compressor.IsAvailable()
-}
-
-// GetCompressionFormat returns the format used by the compressor.
-func (b *Backup) GetCompressionFormat() string {
-	return b.compressor.GetFormat()
-}
-
-// IsSevenZipAvailable checks if 7-Zip is available (backward compat).
-func (b *Backup) IsSevenZipAvailable() bool {
-	return b.compressor.IsAvailable()
-}
-
-// Run executes a backup with the given options.
-func (b *Backup) Run(opts BackupOptions, progress ProgressCallback) (*BackupResult, error) {
-	result := &BackupResult{
-		ID:        GenerateBackupID(),
-		StartTime: time.Now(),
-		Errors:    []string{},
+// ParseSelection turns "1,3,10" into a deduped slice of 1-based indexes.
+// Empty input means "all" → returned as nil.
+func ParseSelection(input string, max int) ([]int, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil, nil
 	}
-
-	logger.Info("starting backup", "id", result.ID)
-
-	// Validate compressor availability
-	if !b.compressor.IsAvailable() {
-		return nil, fmt.Errorf("compressor not available. For legacy builds, install 7-Zip")
-	}
-
-	// Get archive extension from compressor
-	archiveExt := "." + b.compressor.GetFormat()
-
-	// Phase 1: Create backup directory structure
-	if progress != nil {
-		progress("init", 0, 0, "Creating backup directory...")
-	}
-
-	dateFolder := GetDateFolder()
-	timeFolder := GetTimeFolder()
-
-	var backupPath string
-	if opts.Checkpoint {
-		safeName := sanitizeFolderName(opts.Note)
-		if safeName == "" {
-			safeName = "checkpoint"
-		}
-		backupPath = filepath.Join(b.config.GetBackupPath(), fmt.Sprintf("%s_%s", dateFolder, safeName))
-	} else {
-		backupPath = filepath.Join(b.config.GetBackupPath(), dateFolder, timeFolder)
-	}
-
-	result.Path = backupPath
-
-	if err := os.MkdirAll(backupPath, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create backup directory: %w", err)
-	}
-
-	// Determine which webapps to backup
-	webappsToBackup := opts.SelectedWebapps
-	if len(webappsToBackup) == 0 {
-		// No selection = backup all (either from config or all available)
-		if len(b.config.Webapps) > 0 {
-			webappsToBackup = b.config.Webapps
-		} else {
-			// Get all available webapps
-			available, err := b.GetAvailableWebapps()
-			if err != nil {
-				return nil, fmt.Errorf("failed to get available webapps: %w", err)
-			}
-			for _, w := range available {
-				webappsToBackup = append(webappsToBackup, w.Name)
-			}
-		}
-	}
-
-	if opts.DryRun {
-		logger.Info("dry run - would backup webapps", "webapps", webappsToBackup)
-		result.Success = true
-		result.EndTime = time.Now()
-		result.Duration = result.EndTime.Sub(result.StartTime)
-		return result, nil
-	}
-
-	// Phase 2: Copy and compress webapps
-	webappsPath := config.NormalizePath(b.config.WebappsPath)
-
-	for i, webappName := range webappsToBackup {
-		webappSrc := filepath.Join(webappsPath, webappName)
-
-		if _, err := os.Stat(webappSrc); os.IsNotExist(err) {
-			result.Errors = append(result.Errors, fmt.Sprintf("webapp not found: %s", webappName))
+	seen := map[int]bool{}
+	var out []int
+	for _, part := range strings.Split(input, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
 			continue
 		}
-
-		if progress != nil {
-			progress("copy", i+1, len(webappsToBackup), fmt.Sprintf("Copying %s...", webappName))
+		var n int
+		if _, err := fmt.Sscanf(part, "%d", &n); err != nil {
+			return nil, fmt.Errorf("invalid number %q", part)
 		}
-
-		logger.Info("processing webapp", "name", webappName, "source", webappSrc)
-
-		// Archive path (extension based on compressor format)
-		archivePath := filepath.Join(backupPath, sanitizeFolderName(webappName)+archiveExt)
-
-		// Streaming compression (pure Go for modern, 7-Zip for legacy)
-		compResult, err := b.compressor.CompressFolder(
-			webappSrc,
-			archivePath,
-			func(current int, filename string) {
-				if progress != nil {
-					progress("compress", current, 0, filename)
-				}
-			},
-		)
-
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", webappName, err))
-			logger.Error("failed to backup webapp", "name", webappName, "error", err)
-			continue
+		if n < 1 || n > max {
+			return nil, fmt.Errorf("number %d out of range (1-%d)", n, max)
 		}
-
-		result.FilesProcessed += compResult.FilesProcessed
-		result.OriginalSize += compResult.OriginalSize
-		result.CompressedSize += compResult.CompressedSize
-		result.Errors = append(result.Errors, compResult.Errors...)
-	}
-
-	// Phase 3: Backup custom folders
-	customFolders := b.GetAvailableCustomFolders()
-	selectedCustom := opts.SelectedCustom
-
-	for i, folder := range customFolders {
-		// Skip if not selected (when selection is provided)
-		if len(selectedCustom) > 0 {
-			selected := false
-			for _, s := range selectedCustom {
-				if s == folder.Title {
-					selected = true
-					break
-				}
-			}
-			if !selected {
-				continue
-			}
-		}
-
-		if !folder.Exists {
-			if folder.Required {
-				result.Errors = append(result.Errors, fmt.Sprintf("required folder not found: %s", folder.Title))
-			}
-			continue
-		}
-
-		if progress != nil {
-			progress("custom", i+1, len(customFolders), fmt.Sprintf("Backing up %s...", folder.Title))
-		}
-
-		logger.Info("processing custom folder", "title", folder.Title, "path", folder.Path)
-
-		archivePath := filepath.Join(backupPath, sanitizeFolderName(folder.Title)+archiveExt)
-
-		compResult, err := b.compressor.CompressFolder(
-			folder.Path,
-			archivePath,
-			func(current int, filename string) {
-				if progress != nil {
-					progress("compress", current, 0, filename)
-				}
-			},
-		)
-
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", folder.Title, err))
-			logger.Error("failed to backup custom folder", "title", folder.Title, "error", err)
-			continue
-		}
-
-		result.FilesProcessed += compResult.FilesProcessed
-		result.OriginalSize += compResult.OriginalSize
-		result.CompressedSize += compResult.CompressedSize
-	}
-
-	// Phase 4: Save metadata
-	if progress != nil {
-		progress("metadata", 0, 0, "Saving metadata...")
-	}
-
-	result.EndTime = time.Now()
-	result.Duration = result.EndTime.Sub(result.StartTime)
-
-	meta := &Metadata{
-		ID:              result.ID,
-		CreatedAt:       result.StartTime,
-		DurationSeconds: int(result.Duration.Seconds()),
-		Files: FileStats{
-			Count:          result.FilesProcessed,
-			OriginalSize:   FormatSize(result.OriginalSize),
-			CompressedSize: FormatSize(result.CompressedSize),
-		},
-		Note: opts.Note,
-	}
-
-	metadataPath := filepath.Join(backupPath, "metadata.json")
-	if err := SaveMetadata(metadataPath, meta); err != nil {
-		result.Errors = append(result.Errors, "metadata error: "+err.Error())
-		logger.Error("failed to save metadata", "error", err)
-	}
-
-	// Phase 5: Update index
-	index, err := LoadIndex(b.config.GetIndexPath())
-	if err != nil {
-		logger.Warn("failed to load index, creating new", "error", err)
-		index = &Index{Backups: []IndexEntry{}}
-	}
-
-	relPath, _ := filepath.Rel(b.config.GetBackupPath(), backupPath)
-
-	entry := IndexEntry{
-		ID:         result.ID,
-		Date:       result.StartTime,
-		Path:       relPath,
-		Size:       FormatSize(result.CompressedSize),
-		Checkpoint: opts.Checkpoint,
-		Note:       opts.Note,
-	}
-
-	if !opts.Checkpoint && b.config.Retention.Enabled && b.config.Retention.Days > 0 {
-		deleteDate := result.StartTime.AddDate(0, 0, b.config.Retention.Days)
-		entry.DeleteAfter = deleteDate.Format("2006-01-02")
-	}
-
-	index.AddEntry(entry)
-
-	if err := SaveIndex(b.config.GetIndexPath(), index); err != nil {
-		result.Errors = append(result.Errors, "index error: "+err.Error())
-		logger.Error("failed to save index", "error", err)
-	}
-
-	result.Success = len(result.Errors) == 0
-
-	logger.Info("backup completed",
-		"id", result.ID,
-		"path", result.Path,
-		"duration", result.Duration,
-		"files", result.FilesProcessed,
-		"size", FormatSize(result.CompressedSize))
-
-	return result, nil
-}
-
-// List returns all backups from the index.
-func (b *Backup) List() ([]IndexEntry, error) {
-	index, err := LoadIndex(b.config.GetIndexPath())
-	if err != nil {
-		return nil, err
-	}
-	return index.Backups, nil
-}
-
-// GetLatest returns the most recent backup.
-func (b *Backup) GetLatest() (*IndexEntry, error) {
-	index, err := LoadIndex(b.config.GetIndexPath())
-	if err != nil {
-		return nil, err
-	}
-	return index.GetLatest(), nil
-}
-
-// Restore extracts a backup to the target directory.
-func (b *Backup) Restore(backupID, targetPath string, progress ProgressCallback) error {
-	if !b.compressor.IsAvailable() {
-		return fmt.Errorf("compressor not available")
-	}
-
-	index, err := LoadIndex(b.config.GetIndexPath())
-	if err != nil {
-		return err
-	}
-
-	entry := index.GetByID(backupID)
-	if entry == nil {
-		return fmt.Errorf("backup not found: %s", backupID)
-	}
-
-	backupPath := filepath.Join(b.config.GetBackupPath(), entry.Path)
-
-	// Create target directory
-	if err := os.MkdirAll(targetPath, 0755); err != nil {
-		return fmt.Errorf("failed to create target directory: %w", err)
-	}
-
-	// Find all archives in backup directory (supports multiple formats)
-	entries, err := os.ReadDir(backupPath)
-	if err != nil {
-		return fmt.Errorf("failed to read backup directory: %w", err)
-	}
-
-	// Supported archive extensions
-	archiveExts := map[string]bool{
-		".tar.zst": true,
-		".tar.gz":  true,
-		".tgz":     true,
-		".7z":      true,
-		".zip":     true,
-	}
-
-	for _, e := range entries {
-		name := e.Name()
-		ext := filepath.Ext(name)
-
-		// Check for .tar.zst or .tar.gz (double extension)
-		if ext == ".zst" || ext == ".gz" {
-			base := name[:len(name)-len(ext)]
-			if filepath.Ext(base) == ".tar" {
-				ext = filepath.Ext(base) + ext
-			}
-		}
-
-		if !archiveExts[ext] {
-			continue
-		}
-
-		archivePath := filepath.Join(backupPath, name)
-
-		if progress != nil {
-			progress("extract", 0, 0, fmt.Sprintf("Extracting %s...", name))
-		}
-
-		if err := b.compressor.Extract(archivePath, targetPath, func(msg string) {
-			if progress != nil {
-				progress("extract", 0, 0, msg)
-			}
-		}); err != nil {
-			return fmt.Errorf("failed to extract %s: %w", name, err)
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
 		}
 	}
-
-	logger.Info("restore completed", "backup", backupID, "target", targetPath)
-	return nil
-}
-
-// MarkCheckpoint marks a backup as a checkpoint.
-func (b *Backup) MarkCheckpoint(backupID, note string) error {
-	index, err := LoadIndex(b.config.GetIndexPath())
-	if err != nil {
-		return err
-	}
-
-	if !index.MarkAsCheckpoint(backupID, note) {
-		return fmt.Errorf("backup not found: %s", backupID)
-	}
-
-	return SaveIndex(b.config.GetIndexPath(), index)
+	return out, nil
 }

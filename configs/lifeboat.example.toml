@@ -1,0 +1,22 @@
+# TTS Lifeboat configuration
+# Place this file as lifeboat.toml next to lifeboat.exe.
+
+name = "My-Webapp"
+
+# Absolute path to your Tomcat webapps folder. Forward slashes work on Windows.
+webapps_path = "C:/TTS/MyApp/Tomcat/webapps"
+
+# Where backups are written. "." = same folder as this file.
+backup_path = "."
+
+# true  = compress each item into a .tar.zst archive
+# false = plain folder copy (fastest, no compression)
+compression = false
+
+# Auto-delete backups older than this many days (0 = never delete).
+retention_days = 30
+
+# Optional extra folders to back up alongside webapps (e.g. Tomcat conf).
+extra_folders = []
+# Example:
+# extra_folders = ["C:/TTS/MyApp/Tomcat/conf"]

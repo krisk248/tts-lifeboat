@@ -1,107 +1,89 @@
+// Package config loads the lifeboat.toml file next to the executable.
 package config
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
-	"gopkg.in/yaml.v3"
+	"github.com/BurntSushi/toml"
 )
 
-const (
-	// DefaultConfigFile is the default configuration filename.
-	DefaultConfigFile = "lifeboat.yaml"
-)
+const DefaultFile = "lifeboat.toml"
 
-// Load reads and parses a configuration file from the given path.
-// If path is empty, it looks for lifeboat.yaml in the current directory.
+// Load reads lifeboat.toml from path (or next to the binary if empty)
+// and resolves relative paths against the config's directory.
 func Load(path string) (*Config, error) {
 	if path == "" {
-		path = DefaultConfigFile
+		path = DefaultFile
 	}
-
-	// Make path absolute if relative
 	if !filepath.IsAbs(path) {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get working directory: %w", err)
+			return nil, err
 		}
 		path = filepath.Join(cwd, path)
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	cfg := DefaultConfig()
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	cfg := Default()
+	if _, err := toml.Decode(string(data), cfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
-	// Resolve relative paths
-	configDir := filepath.Dir(path)
-	cfg.resolvePaths(configDir)
-
-	return cfg, nil
-}
-
-// LoadFromBytes parses configuration from YAML bytes.
-func LoadFromBytes(data []byte) (*Config, error) {
-	cfg := DefaultConfig()
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse config: %w", err)
+	dir := filepath.Dir(path)
+	if cfg.BackupPath == "." || cfg.BackupPath == "" {
+		cfg.BackupPath = dir
+	} else if !filepath.IsAbs(cfg.BackupPath) {
+		cfg.BackupPath = filepath.Join(dir, cfg.BackupPath)
+	}
+	cfg.WebappsPath = normalize(cfg.WebappsPath)
+	cfg.BackupPath = normalize(cfg.BackupPath)
+	for i, f := range cfg.ExtraFolders {
+		cfg.ExtraFolders[i] = normalize(f)
 	}
 	return cfg, nil
 }
 
-// Save writes the configuration to a YAML file.
-func (c *Config) Save(path string) error {
-	data, err := yaml.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
+// normalize converts mixed separators to OS-native ones.
+func normalize(p string) string {
+	if p == "" {
+		return p
 	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
-	}
-
-	return nil
+	p = strings.ReplaceAll(p, "\\\\", "/")
+	p = strings.ReplaceAll(p, "\\", "/")
+	return filepath.FromSlash(p)
 }
 
-// resolvePaths converts relative paths to absolute paths based on config directory.
-func (c *Config) resolvePaths(configDir string) {
-	// Resolve backup path
-	if c.BackupPath == "." || c.BackupPath == "" {
-		c.BackupPath = configDir
-	} else if !filepath.IsAbs(c.BackupPath) {
-		c.BackupPath = filepath.Join(configDir, c.BackupPath)
-	}
+// Example returns the commented TOML template written by `config init`.
+func Example(name, webappsPath string) string {
+	return fmt.Sprintf(`# TTS Lifeboat configuration
+# Place this file as lifeboat.toml next to lifeboat.exe.
 
-	// Resolve logging path
-	if c.Logging.Path != "" && !filepath.IsAbs(c.Logging.Path) {
-		c.Logging.Path = filepath.Join(configDir, c.Logging.Path)
-	}
-}
+name = "%s"
 
-// GetBackupDestination returns the full path for a new backup.
-// Format: backup_path/YYYYMMDD/HHMM
-func (c *Config) GetBackupDestination(date string, time string) string {
-	return filepath.Join(c.BackupPath, date, time)
-}
+# Absolute path to your Tomcat webapps folder. Forward slashes work on Windows.
+webapps_path = "%s"
 
-// GetCheckpointDestination returns the full path for a checkpoint backup.
-// Format: backup_path/YYYYMMDD_description
-func (c *Config) GetCheckpointDestination(date string, description string) string {
-	return filepath.Join(c.BackupPath, fmt.Sprintf("%s_%s", date, description))
-}
+# Where backups are written. "." = same folder as this file.
+backup_path = "."
 
-// GetIndexPath returns the path to the backup index file.
-func (c *Config) GetIndexPath() string {
-	return filepath.Join(c.BackupPath, "index.json")
-}
+# true  = compress each item into a .tar.zst archive
+# false = plain folder copy (fastest, no compression)
+compression = %t
 
-// GetLogsPath returns the path to the logs directory.
-func (c *Config) GetLogsPath() string {
-	return filepath.Join(c.BackupPath, "logs")
+# Auto-delete backups older than this many days (0 = never delete).
+retention_days = 30
+
+# Optional extra folders to back up alongside webapps (e.g. Tomcat conf).
+# Leave empty to skip.
+extra_folders = []
+# Example:
+# extra_folders = ["C:/TTS/MyApp/Tomcat/conf"]
+`, name, webappsPath, defaultCompression())
 }
